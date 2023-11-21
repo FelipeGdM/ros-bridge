@@ -11,6 +11,7 @@ use max wheel steer angle
 """
 
 import sys
+import numpy as np
 
 import ros_compatibility as roscomp
 from ros_compatibility.exceptions import ROSException
@@ -38,6 +39,7 @@ class TwistToVehicleControl(CompatibleNode):  # pylint: disable=too-few-public-m
 
         self.role_name = self.get_param("role_name", "ego_vehicle")
         self.max_steering_angle = None
+        self.wheels_axis_distance = None
 
         self.new_subscription(
             CarlaEgoVehicleInfo,
@@ -56,6 +58,24 @@ class TwistToVehicleControl(CompatibleNode):  # pylint: disable=too-few-public-m
             "/carla/{}/vehicle_control_cmd".format(self.role_name),
             qos_profile=10)
 
+    def _compute_wheels_axis_distance(self, wheels):
+        front_wheels = wheels[0:2]
+        rear_wheels = wheels[2:4]
+
+        front_center_point = np.array([
+            front_wheels[0].position.x + front_wheels[1].position.x,
+            front_wheels[0].position.y + front_wheels[1].position.y,
+            front_wheels[0].position.z + front_wheels[1].position.z
+        ]) / 2.0
+
+        rear_center_point = np.array([
+            rear_wheels[0].position.x + rear_wheels[1].position.x,
+            rear_wheels[0].position.y + rear_wheels[1].position.y,
+            rear_wheels[0].position.z + rear_wheels[1].position.z
+        ]) / 2.0
+
+        return np.linalg.norm(front_center_point - rear_center_point)
+
     def update_vehicle_info(self, vehicle_info):
         """
         callback to receive ego-vehicle info
@@ -69,7 +89,15 @@ class TwistToVehicleControl(CompatibleNode):  # pylint: disable=too-few-public-m
             self.logerr("Cannot determine max steering angle: Value is %s",
                         self.max_steering_angle)
             sys.exit(1)
-        self.loginfo("Vehicle info received. Max steering angle={}".format(self.max_steering_angle))
+
+        self.wheels_axis_distance = self._compute_wheels_axis_distance(vehicle_info.wheels)
+        if not self.wheels_axis_distance:
+            self.logerr("Cannot determine wheels distance: Value is %s",
+                        self.wheels_axis_distance)
+            sys.exit(1)
+
+        self.loginfo("Vehicle info received. Max steering angle={} Wheels distance={}".format(
+            self.max_steering_angle, self.wheels_axis_distance))
 
     def twist_received(self, twist):
         """
@@ -94,11 +122,13 @@ class TwistToVehicleControl(CompatibleNode):  # pylint: disable=too-few-public-m
                 control.throttle = max(-TwistToVehicleControl.MAX_LON_ACCELERATION,
                                        twist.linear.x) / -TwistToVehicleControl.MAX_LON_ACCELERATION
 
+            desired_steer_angle = np.arctan2(
+                twist.angular.z*self.wheels_axis_distance, twist.linear.x)
             if twist.angular.z > 0:
-                control.steer = -min(self.max_steering_angle, twist.angular.z) / \
+                control.steer = -min(self.max_steering_angle, desired_steer_angle) / \
                     self.max_steering_angle
             else:
-                control.steer = -max(-self.max_steering_angle, twist.angular.z) / \
+                control.steer = -max(-self.max_steering_angle, desired_steer_angle) / \
                     self.max_steering_angle
         try:
             self.pub.publish(control)
